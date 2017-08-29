@@ -37,7 +37,9 @@ case class DataSourceParams(
   appName: String,
   eventNames: List[String], // IMPORTANT: eventNames must be exactly the same as URAlgorithmParams eventNames
   eventWindow: Option[EventWindow],
-  minEventsPerUser: Option[Int]) // defaults to 1 event, if the user has only one thehy will not contribute to
+  minEventsPerUser: Option[Int], // defaults to 1000 events
+  maxEventsPerUser: Option[Int], // defaults to 1 event, if the user has only one thehy will not contribute to
+  minEventsPerItem: Option[Int]) // defaults to 1 event, if the item has less it will be deleted from dataset
     // training anyway
     extends Params
 
@@ -59,7 +61,9 @@ class DataSource(val dsp: DataSourceParams)
     ("App name", appName),
     ("Event window", eventWindow),
     ("Event names", dsp.eventNames),
-    ("Min events per user", dsp.minEventsPerUser)))
+    ("Min events per user", dsp.minEventsPerUser),
+    ("Max events per user", dsp.maxEventsPerUser),
+    ("Min events per item", dsp.minEventsPerItem)))
 
   /** Reads events from PEventStore and create and RDD for each */
   override def readTraining(sc: SparkContext): TrainingData = {
@@ -98,7 +102,7 @@ class DataSource(val dsp: DataSourceParams)
 
     // Have a list of (actionName, RDD), for each action
     // todo: some day allow data to be content, which requires rethinking how to use EventStore
-    TrainingData(eventRDDs, fieldsRDD, dsp.minEventsPerUser)
+    TrainingData(eventRDDs, fieldsRDD, dsp.minEventsPerUser, dsp.maxEventsPerUser, dsp.minEventsPerItem)
   }
 }
 
@@ -107,11 +111,15 @@ class DataSource(val dsp: DataSourceParams)
  *  @param actions List of Tuples (actionName, actionRDD)qw
  *  @param fieldsRDD RDD of item keyed PropertyMap for item metadata
  *  @param minEventsPerUser users with less than this many events will not removed from training data
+ *  @param maxEventsPerUser users with more will be removed
+ *  @param maxEventsPerItem items with less interactions will be removed
  */
 case class TrainingData(
     actions: Seq[(ActionID, RDD[(UserID, ItemID)])],
     fieldsRDD: RDD[(ItemID, PropertyMap)],
-    minEventsPerUser: Option[Int] = Some(1)) extends Serializable {
+    minEventsPerUser: Option[Int] = Some(1),
+    maxEventsPerUser: Option[Int] = Some(1000),
+    minEventsPerItem: Option[Int] = Some(1)) extends Serializable {
 
   override def toString: String = {
     val a = actions.map { t =>

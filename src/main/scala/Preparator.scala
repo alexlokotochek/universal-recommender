@@ -41,6 +41,11 @@ class Preparator
    *  @param trainingData list of (actionName, actionRDD)
    *  @return list of (correlatorName, correlatorIndexedDataset)
    */
+
+  def invRDD[K, V](rdd: RDD[(K, V)]): RDD[(V, K)] = {
+    rdd.map { case (key: K, value: V) => (value, key) }
+  }
+
   def prepare(sc: SparkContext, trainingData: TrainingData): PreparedData = {
     // now that we have all actions in separate RDDs we must merge any user dictionaries and
     // make sure the same user ids map to the correct events
@@ -54,17 +59,29 @@ class Preparator
         logger.info("EventName: " + eventName)
         // logger.info(s"first eventName is ${trainingData.actions.head._1.toString}")
         val ids = if (eventName == trainingData.actions.head._1.toString && trainingData.minEventsPerUser.nonEmpty) {
-          val dIDS = IndexedDatasetSpark(eventRDD, trainingData.minEventsPerUser.get)(sc)
-          logger.info(s"Downsampled  users for minEventsPerUser: ${trainingData.minEventsPerUser}, eventName: $eventName" +
-            s" number of passing user-ids: ${dIDS.rowIDs.size}")
-          logger.info(s"Dimensions rows : ${dIDS.matrix.nrow.toString} columns: ${dIDS.matrix.ncol.toString}")
+
+          val preprocessedEventRDD = eventRDD
+          if (trainingData.minEventsPerItem.nonEmpty) {
+            val itemIdsRDD: RDD[(String, String)] = invRDD(eventRDD).groupByKey().filter {
+              case (item, userIds) =>
+                userIds.size >= trainingData.minEventsPerItem.get
+            } map {
+              p => (p._1, "mock")
+            }
+            val preprocessedEventRDD = invRDD(invRDD(eventRDD).join(itemIdsRDD, sc.defaultParallelism).mapValues(_._1))
+          }
+
+          val filteredUsersDataset = IndexedDatasetSpark(preprocessedEventRDD, trainingData.minEventsPerUser.get, trainingData.maxEventsPerUser.get)(sc)
+          logger.info(s"Downsampled  users for min..max EventsPerUser: ${trainingData.minEventsPerUser}, ${trainingData.maxEventsPerUser}" +
+            s"and min EventsPerItem: $${trainingData.minEventsPerItem}, eventName: $eventName" +
+            s" number of passing user-ids: ${filteredUsersDataset.rowIDs.size}")
+          logger.info(s"Dimensions rows : ${filteredUsersDataset.matrix.nrow.toString} columns: ${filteredUsersDataset.matrix.ncol.toString}")
+          //val filteredItemsDataset = IndexedDatasetSpark(invRDD(eventRDD), trainingData.minEventsPerItem.get, Int(10000))(sc)
+          //logger.info(s"Downsampled items for minEventsPerItem: ${trainingData.minEventsPerItem}, eventName: $eventName" +
+          //  s" number of passing user-ids: ${filteredItemsDataset.rowIDs.size}")
+          //logger.info(s"Dimensions rows : ${filteredItemsDataset.matrix.nrow.toString} columns: ${dIDS.matrix.ncol.toString}")
           // we have removed underactive users now remove the items they were the only to interact with
-          val ddIDS = IndexedDatasetSpark(eventRDD, Some(dIDS.rowIDs))(sc) // use the downsampled rows to downnsample
-          userDictionary = Some(ddIDS.rowIDs)
-          logger.info(s"Downsampled columns for users who pass minEventPerUser: ${trainingData.minEventsPerUser}, " +
-            s"eventName: $eventName number of user-ids: ${userDictionary.get.size}")
-          logger.info(s"Dimensions rows : ${ddIDS.matrix.nrow.toString} columns: ${ddIDS.matrix.ncol.toString}")
-          //ddIDS.dfsWrite(eventName.toString, DefaultIndexedDatasetWriteSchema)(new SparkDistributedContext(sc))
+          val ddIDS = IndexedDatasetSpark(preprocessedEventRDD, Some(filteredUsersDataset.rowIDs))
           ddIDS
         } else {
           //logger.info(s"IndexedDatasetSpark for eventName: $eventName User ids: $userDictionary")
@@ -101,7 +118,9 @@ object IndexedDatasetSpark {
 
   def apply(
     elements: RDD[(String, String)],
-    minEventsPerUser: Int)(implicit sc: SparkContext): IndexedDatasetSpark = {
+    minEventsPerUser: Int,
+    maxEventsPerUser: Int,
+    minEventsPerItem: Int)(implicit sc: SparkContext): IndexedDatasetSpark = {
     // todo: a further optimization is to return any broadcast dictionaries so they can be passed in and
     // do not get broadcast again. At present there may be duplicate broadcasts.
 
@@ -124,11 +143,20 @@ object IndexedDatasetSpark {
 
     val ncol = itemIDDictionary.size
     //val nrow = rowIDDictionary.size
-    val minEvents = minEventsPerUser
 
+    //val itemIdsRDD: RDD[(String, String)] = invRDD(elements).groupByKey().filter {
+    //  case (item, userIds) =>
+    //    userIds.size >= minEventsPerItem
+    //} map {
+    //  p => (p._1, "mock")
+    //}
+
+    //val reducedItemsRDD = invRDD(invRDD(elements).join(itemIdsRDD, sc.defaultParallelism).mapValues(_._1))
+
+    //val downsampledInteractions = reducedItemsRDD.groupByKey().filter {
     val downsampledInteractions = elements.groupByKey().filter {
       case (userId, items) =>
-        items.size >= minEvents
+        items.size >= minEventsPerUser && items.size <= maxEventsPerUser
     }
 
     val downsampledUserIDDictionary = new BiDictionary(downsampledInteractions.map {
